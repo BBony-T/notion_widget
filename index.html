@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Google Calendar Notion Widget – v1</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#0f172a; --muted:#e5e7eb; --sub:#6b7280; --accent:#2563eb; --pill:#f3f4f6;
+    --card:#ffffff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif; background:var(--bg); color:var(--fg)}
+  .wrap{max-width:820px; margin:0 auto; padding:14px}
+  .row{display:flex; align-items:center; justify-content:space-between; gap:8px}
+  .title{font-weight:800; font-size:20px; margin:0}
+  .sub{color:var(--sub); font-size:12px}
+  .controls{display:flex; gap:8px; flex-wrap:wrap}
+  select,input,button{font-size:14px; padding:8px 10px; border:1px solid var(--muted); border-radius:10px; background:#fff}
+  button.primary{background:var(--accent); color:#fff; border:none}
+  .grid{display:grid; gap:10px; margin-top:12px}
+  @media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+  .card{border:1px solid var(--muted); background:var(--card); border-radius:14px; padding:12px}
+  .day{font-weight:700; margin:0 0 8px}
+  .ev{display:grid; grid-template-columns:auto 1fr; gap:10px; padding:10px; border:1px solid var(--muted); border-radius:12px; align-items:flex-start}
+  .time{font-variant-numeric:tabular-nums; font-weight:700}
+  .badge{display:inline-block; background:var(--pill); border-radius:999px; padding:2px 8px; font-size:12px}
+  .muted{color:var(--sub)}
+  .loc{font-size:12px}
+  .pill{display:inline-flex; align-items:center; gap:6px}
+  .legend{display:flex; gap:6px; flex-wrap:wrap}
+  .legend .badge{opacity:.9}
+  .footer{margin-top:10px; font-size:12px; color:var(--sub)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row">
+    <h1 class="title" id="title">학교 일정</h1>
+    <div class="controls">
+      <select id="rangeSel">
+        <option value="7">7일</option>
+        <option value="14" selected>14일</option>
+        <option value="30">30일</option>
+      </select>
+      <button class="primary" id="refreshBtn">새로고침</button>
+    </div>
+  </div>
+  <div class="sub" id="rangeText">기간 표시</div>
+
+  <div class="legend" id="legend" style="margin-top:8px"></div>
+  
+  <div class="grid" id="grid" aria-live="polite"></div>
+  <div class="footer">URL 파라미터: <code>?calendarId=your_id@group.calendar.google.com&days=14&title=학교 일정&theme=slate</code> • Asia/Seoul 기준</div>
+</div>
+
+<script>
+/**
+ * Google Calendar Notion Widget – v1
+ * - 클라이언트 전용(공개 캘린더 + referrer 제한 API Key) 또는 서버리스 프록시 사용 가능
+ * - URL params: calendarId, days, title, theme(light|slate|emerald|rose|violet), maxPerDay
+ */
+const qs = new URLSearchParams(location.search);
+const CAL_ID = qs.get('calendarId') || 'primary';
+const DAYS = Math.max(1, parseInt(qs.get('days')||'14',10));
+const TITLE = qs.get('title') || '학교 일정';
+const THEME = (qs.get('theme')||'light').toLowerCase();
+const MAX_PER_DAY = Math.max(1, parseInt(qs.get('maxPerDay')||'6',10));
+
+// THEME presets
+const themes = {
+  light: {bg:'#fff', fg:'#0f172a', card:'#fff', muted:'#e5e7eb', sub:'#6b7280', accent:'#2563eb', pill:'#f3f4f6'},
+  slate: {bg:'#0b1220', fg:'#e5ecff', card:'#0f172a', muted:'#1f2a44', sub:'#93a3c7', accent:'#7aa2ff', pill:'#1b2541'},
+  emerald: {bg:'#ffffff', fg:'#064e3b', card:'#ffffff', muted:'#d1fae5', sub:'#10b981', accent:'#059669', pill:'#ecfdf5'},
+  rose: {bg:'#ffffff', fg:'#3f1d2e', card:'#ffffff', muted:'#ffe4e6', sub:'#fb7185', accent:'#e11d48', pill:'#fff1f2'},
+  violet: {bg:'#ffffff', fg:'#2e1065', card:'#ffffff', muted:'#ede9fe', sub:'#8b5cf6', accent:'#7c3aed', pill:'#f5f3ff'}
+};
+if(themes[THEME]){
+  const t = themes[THEME];
+  document.documentElement.style.setProperty('--bg', t.bg);
+  document.documentElement.style.setProperty('--fg', t.fg);
+  document.documentElement.style.setProperty('--muted', t.muted);
+  document.documentElement.style.setProperty('--sub', t.sub);
+  document.documentElement.style.setProperty('--accent', t.accent);
+  document.documentElement.style.setProperty('--pill', t.pill);
+  document.documentElement.style.setProperty('--card', t.card);
+}
+
+// Title
+const titleEl = document.getElementById('title');
+const grid = document.getElementById('grid');
+const rangeSel = document.getElementById('rangeSel');
+const rangeText = document.getElementById('rangeText');
+const legend = document.getElementById('legend');
+
+titleEl.textContent = TITLE;
+rangeSel.value = String(DAYS);
+
+function toKST(d){
+  // Force display in user's local timezone; Notion iframe uses viewer TZ. For Korea users this is fine.
+  return d;
+}
+
+function fmtDate(d){
+  return new Intl.DateTimeFormat('ko-KR', { weekday:'short', month:'numeric', day:'numeric'}).format(d);
+}
+function fmtTime(d){
+  return new Intl.DateTimeFormat('ko-KR', { hour:'2-digit', minute:'2-digit', hour12:false}).format(d);
+}
+
+function groupByDay(items){
+  const map = new Map();
+  for(const it of items){
+    const start = new Date(it.start.dateTime || it.start.date);
+    const key = new Date(start.getFullYear(), start.getMonth(), start.getDate()).toISOString().slice(0,10);
+    if(!map.has(key)) map.set(key, []);
+    map.get(key).push(it);
+  }
+  return map;
+}
+
+function buildLegend(items){
+  const colors = new Map();
+  const css = getComputedStyle(document.documentElement);
+  items.forEach(ev=>{
+    const col = ev.colorId || 'default';
+    if(!colors.has(col)) colors.set(col, (ev.summary||'일정'));
+  });
+  legend.innerHTML = '';
+  colors.forEach((name, id)=>{
+    const span = document.createElement('span');
+    span.className='badge';
+    span.textContent = id==='default' ? '기본' : `색상 ${id}`;
+    legend.appendChild(span);
+  });
+}
+
+function render(items, start, end){
+  buildLegend(items);
+  rangeText.textContent = `${start.toISOString().slice(0,10)} ~ ${end.toISOString().slice(0,10)}`;
+  const byDay = groupByDay(items);
+  grid.innerHTML = '';
+  const daysSorted = Array.from(byDay.keys()).sort();
+  daysSorted.forEach(key=>{
+    const dayCard = document.createElement('div'); dayCard.className='card';
+    const d = new Date(key);
+    const h2 = document.createElement('h2'); h2.className='day'; h2.textContent = fmtDate(d);
+    dayCard.appendChild(h2);
+    const dayEvents = byDay.get(key).slice(0, MAX_PER_DAY);
+    dayEvents.forEach(ev=>{
+      const row = document.createElement('div'); row.className='ev';
+      const allDay = !!ev.start.date;
+      const start = new Date(ev.start.dateTime || ev.start.date);
+      const end = new Date(ev.end?.dateTime || ev.end?.date || ev.start.dateTime || ev.start.date);
+      const time = document.createElement('div'); time.className='time';
+      time.textContent = allDay ? '종일' : `${fmtTime(start)}\n~ ${fmtTime(end)}`;
+      const main = document.createElement('div');
+      const title = document.createElement('div'); title.style.fontWeight='700'; title.textContent = ev.summary || '(제목 없음)';
+      const meta = document.createElement('div'); meta.className='muted'; meta.style.fontSize='12px';
+      const pieces = [];
+      if(ev.organizer?.displayName) pieces.push(`주최: ${ev.organizer.displayName}`);
+      if(ev.location) pieces.push(`장소: ${ev.location}`);
+      meta.textContent = pieces.join('  •  ');
+      const extra = document.createElement('div'); extra.style.marginTop='6px';
+      if(ev.hangoutLink){
+        const a = document.createElement('a'); a.href = ev.hangoutLink; a.target='_blank'; a.rel='noopener'; a.textContent='Google Meet'; a.className='badge'; extra.appendChild(a);
+      }
+      if(ev.htmlLink){
+        const a = document.createElement('a'); a.href = ev.htmlLink; a.target='_blank'; a.rel='noopener'; a.textContent='캘린더 열기'; a.className='badge'; a.style.marginLeft='6px'; extra.appendChild(a);
+      }
+      main.appendChild(title); if(pieces.length) main.appendChild(meta); if(extra.childNodes.length) main.appendChild(extra);
+      row.appendChild(time); row.appendChild(main); dayCard.appendChild(row);
+    });
+    grid.appendChild(dayCard);
+  });
+}
+
+async function fetchEvents(days){
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end = new Date(start.getTime() + days*86400000);
+
+  // --- OPTION A: 서버리스 프록시 (추천) ---
+  const proxy = qs.get('proxy'); // e.g. https://your-app.vercel.app/api/events
+  if(proxy){
+    const url = new URL(proxy);
+    url.searchParams.set('calendarId', CAL_ID);
+    url.searchParams.set('timeMin', start.toISOString());
+    url.searchParams.set('timeMax', end.toISOString());
+    url.searchParams.set('maxResults', String(days*8));
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('프록시 오류');
+    const data = await res.json();
+    return { items:data.items||[], start, end };
+  }
+
+  // --- OPTION B: 공개 캘린더 + referrer 제한 API 키 ---
+  const API_KEY = qs.get('apiKey');
+  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(CAL_ID)}/events`;
+  const url = new URL(base);
+  url.searchParams.set('singleEvents','true');
+  url.searchParams.set('orderBy','startTime');
+  url.searchParams.set('timeMin', start.toISOString());
+  url.searchParams.set('timeMax', end.toISOString());
+  url.searchParams.set('maxResults', String(days*8));
+  if(API_KEY) url.searchParams.set('key', API_KEY);
+  const res = await fetch(url);
+  if(!res.ok){
+    const t = await res.text();
+    throw new Error('API 오류: '+t);
+  }
+  const data = await res.json();
+  return { items:data.items||[], start, end };
+}
+
+async function load(){
+  grid.innerHTML = '<div class="sub">불러오는 중…</div>';
+  try{
+    const days = parseInt(rangeSel.value,10);
+    const {items, start, end} = await fetchEvents(days);
+    render(items, start, end);
+  }catch(e){
+    grid.innerHTML = `<div class="sub">문제가 발생했습니다: ${e.message}</div>`;
+  }
+}
+
+// UI events
+rangeSel.addEventListener('change', load);
+document.getElementById('refreshBtn').addEventListener('click', load);
+
+load();
+</script>
+</body>
+</html>
